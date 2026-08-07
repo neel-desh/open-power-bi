@@ -1,0 +1,177 @@
+services:
+  backend:
+    image: ghcr.io/neel-desh/openbi-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    expose:
+      - "8000"
+    env_file: .env
+    depends_on:
+      mindsdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - openbi-network
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - uploads:/app/uploads
+      - ./backend:/app/backend
+      - ./report_templates:/app/report_templates
+      - presenton_data:/app/presenton_data
+    environment:
+      PRESENTON_USERNAME: ${PRESENTON_USERNAME:-openbi}
+      PRESENTON_PASSWORD: ${PRESENTON_PASSWORD:-openbi_pptx_2024}
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    image: ghcr.io/neel-desh/openbi-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: ../Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: ""
+      API_PROXY_TARGET: "http://backend:8000"
+      WS_PROXY_TARGET: "ws://backend:8000"
+      PRESENTON_PROXY_TARGET: "http://presenton:80"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+    networks:
+      - openbi-network
+
+  mindsdb:
+    image: ghcr.io/neel-desh/openbi-mindsdb:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.mindsdb
+    expose:
+      - "47334"
+    environment:
+      MINDSDB_APIS: "http"
+      MINDSDB_API_HTTP_HOST: "0.0.0.0"
+    volumes:
+      - mindsdb_data:/root/mindsdb_storage
+    networks:
+      - openbi-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:47334/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+    networks:
+      - openbi-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  presenton:
+    image: ghcr.io/neel-desh/openbi-presenton:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.presenton
+    ports:
+      - "127.0.0.1:7771:80"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM: ${PRESENTON_LLM_PROVIDER:-google}
+      AUTH_USERNAME: ${PRESENTON_USERNAME:-openbi}
+      AUTH_PASSWORD: ${PRESENTON_PASSWORD:-openbi_pptx_2024}
+    volumes:
+      - presenton_data:/app_data
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      - openbi-network
+
+  telegram_bot:
+    image: ghcr.io/neel-desh/openbi-telegram-bot:latest
+    build:
+      context: .
+      dockerfile: telegram_bot/Dockerfile.telegram
+    env_file: .env
+    environment:
+      API_BASE_URL: "http://backend:8000"
+    depends_on:
+      - backend
+    networks:
+      - openbi-network
+
+  # ── Finance + Retail PostgreSQL ─────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: openbi-postgres
+    environment:
+      POSTGRES_DB: financedb
+      POSTGRES_USER: financeuser
+      POSTGRES_PASSWORD: Finance@123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./seed/demo_finance_pg.sql:/docker-entrypoint-initdb.d/demo_finance_pg.sql:ro
+      - ./seed/postgres-retail.sql:/docker-entrypoint-initdb.d/postgres-retail.sql:ro
+      - ./seed/pg-init/init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+    networks:
+      - openbi-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U financeuser -d financedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  # ── Marketing + HR MySQL ──────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: openbi-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: Root@MySQL123
+      MYSQL_DATABASE: marketingdb
+      MYSQL_USER: marketinguser
+      MYSQL_PASSWORD: Marketing@123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./seed/demo_marketing_mysql.sql:/sql-seed/demo_marketing_mysql.sql:ro
+      - ./seed/mysql-hr.sql:/sql-seed/mysql-hr.sql:ro
+      - ./seed/mysql-init/init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+    networks:
+      - openbi-network
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pRoot@MySQL123"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+networks:
+  openbi-network:
+    driver: bridge
+
+volumes:
+  mindsdb_data:
+  uploads:
+  presenton_data:
+  postgres_data:
+  mysql_data:
